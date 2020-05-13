@@ -1,12 +1,13 @@
 Name:           perl-Devel-Size
 Version:        0.82
-Release:        4
+Release:        5
 Summary:        Perl extension for finding the memory usage of Perl variables
 License:        GPL+ or Artistic
 URL:            https://metacpan.org/release/Devel-Size
 Source0:        https://cpan.metacpan.org/modules/by-module/Devel/Devel-Size-%{version}.tar.gz
 
 BuildRequires:  findutils gcc make perl-interpreter perl-generators perl(ExtUtils::MakeMaker) perl(Test::More)
+BuildRequires:  perl-devel
 Requires:       perl(:MODULE_COMPAT_%(eval "`perl -V:version`"; echo $version))
 
 %?perl_default_filter
@@ -42,5 +43,8 @@ make test
 %{_mandir}/man3/*
 
 %changelog
+* Wed May 13 2020 openEuler Buildteam <buildteam@openeuler.org> - 0.82-5
+- Add build requires of perl-devel
+
 * Sat Jan 11 2020 openEuler Buildteam <buildteam@openeuler.org> - 0.82-4
 - Package init
