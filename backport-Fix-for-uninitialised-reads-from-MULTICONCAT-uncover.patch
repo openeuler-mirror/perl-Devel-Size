@@ -1,0 +1,205 @@
+From a8654aab512862133ac607ca3c97cc82f63f59cb Mon Sep 17 00:00:00 2001
+From: root <root@localhost.com>
+Date: Wed, 21 Sep 2022 17:21:09 +0800
+Subject: * [PATCH] Fix for uninitialised reads from MULTICONCAT uncovered by
+           [CPAN #127932]
+         * Handle allocations in MULTICONCAT's aux structure explicitly.
+         * Handle ARGCHECK and ARGELEM.
+
+Related Issue: https://rt.cpan.org/Public/Bug/Display.html?id=127932
+Patch Source : https://metacpan.org/release/NWCLARK/Devel-Size-0.82_50/diff/NWCLARK%2FDevel-Size-0.82
+---
+ CHANGES           |  5 +++++
+ MANIFEST          |  1 +
+ META.json         |  6 +++---
+ META.yml          |  2 +-
+ Size.xs           | 50 +++++++++++++++++++++++++++++++++++++++++++++--
+ lib/Devel/Size.pm |  2 +-
+ t/basic.t         |  2 +-
+ t/code.t          | 15 +++++++++++++-
+ 8 files changed, 74 insertions(+), 9 deletions(-)
+
+diff --git a/CHANGES b/CHANGES
+index 246c4d1..b09b661 100644
+--- a/CHANGES
++++ b/CHANGES
+@@ -1,5 +1,10 @@
+ Revision history for Perl extension Devel::Size.
+ 
++0.82_50 2019-04-16 nicholas
++  * Fix for uninitialised reads from MULTICONCAT uncovered by [CPAN #127932]
++  * Handle allocations in MULTICONCAT's aux structure explicitly.
++  * Handle ARGCHECK and ARGELEM.
++
+ 0.82 2018-06-23 nicholas
+   * Improve comment describing the fix in cmp_array_ro().
+   * Fix some dates in this file.
+diff --git a/MANIFEST b/MANIFEST
+index 54acc82..2a2e7c9 100644
+--- a/MANIFEST
++++ b/MANIFEST
+@@ -15,6 +15,7 @@ t/pod.t
+ t/pod_cov.t
+ t/pvbm.t
+ t/recurse.t
++t/signatures.t
+ t/warnings.t        A rather exhaustive test for the non-exceptional warnings
+ typemap             The typemap for UV, missing from 5.005_xx
+ META.json                                Module JSON meta-data (added by MakeMaker)
+diff --git a/META.json b/META.json
+index d122214..5b5adb3 100644
+--- a/META.json
++++ b/META.json
+@@ -38,7 +38,7 @@
+          }
+       }
+    },
+-   "release_status" : "stable",
+-   "version" : "0.82",
+-   "x_serialization_backend" : "JSON::PP version 2.97001"
++   "release_status" : "unstable",
++   "version" : "0.82_50",
++   "x_serialization_backend" : "JSON::PP version 4.02"
+ }
+diff --git a/META.yml b/META.yml
+index bf9125a..17d8bb6 100644
+--- a/META.yml
++++ b/META.yml
+@@ -21,5 +21,5 @@ requires:
+   Test::More: '0'
+   XSLoader: '0'
+   perl: '5.005'
+-version: '0.82'
++version: 0.82_50
+ x_serialization_backend: 'CPAN::Meta::YAML version 0.018'
+diff --git a/Size.xs b/Size.xs
+index e0ef024..4552707 100644
+--- a/Size.xs
++++ b/Size.xs
+@@ -572,13 +572,15 @@ op_size(pTHX_ const OP * const baseop, struct state *st)
+ #endif
+ #ifdef OA_UNOP_AUX
+ 	case OPc_UNAUXOP: TAG;
+-	    st->total_size += sizeof(struct unop_aux) + sizeof(UNOP_AUX_item) * (cUNOP_AUXx(baseop)->op_aux[-1].uv+1);
+ 	    op_size(aTHX_ ((UNOP *)baseop)->op_first, st);
+-	    if (baseop->op_type == OP_MULTIDEREF) {
++            switch(baseop->op_type) {
++            case OP_MULTIDEREF:
++            {
+ 		UNOP_AUX_item *items = cUNOP_AUXx(baseop)->op_aux;
+ 		UV actions = items->uv;
+ 		bool last = 0;
+ 		bool is_hash = 0;
++                st->total_size += sizeof(struct unop_aux) + sizeof(UNOP_AUX_item) * (cUNOP_AUXx(baseop)->op_aux[-1].uv+1);
+ 		while (!last) {
+ 		    switch (actions & MDEREF_ACTION_MASK) {
+ 			case MDEREF_reload:
+@@ -631,6 +633,50 @@ op_size(pTHX_ const OP * const baseop, struct state *st)
+ 		    }
+ 		    actions >>= MDEREF_SHIFT;
+ 		}
++                TAG;break;
++           }
++#ifdef OPpMULTICONCAT_STRINGIFY
++           case OP_MULTICONCAT:
++           {
++               UNOP_AUX_item *aux = cUNOP_AUXx(baseop)->op_aux;
++               SSize_t nargs = aux[PERL_MULTICONCAT_IX_NARGS].ssize;
++               const char *plain_pv = aux[PERL_MULTICONCAT_IX_PLAIN_PV].pv;
++               SSize_t plain_size = aux[PERL_MULTICONCAT_IX_PLAIN_LEN].ssize;
++               const char *utf8_pv = aux[PERL_MULTICONCAT_IX_UTF8_PV].pv;
++               SSize_t utf8_size = aux[PERL_MULTICONCAT_IX_UTF8_LEN].ssize;
++               const int has_variant = plain_pv && utf8_pv && plain_pv != utf8_pv;
++               st->total_size += sizeof(UNOP_AUX_item)
++                   *  (
++                       PERL_MULTICONCAT_HEADER_SIZE
++                       + ((nargs + 1) * (has_variant ? 2 : 1))
++                       );
++
++               if (has_variant) {
++                   st->total_size += plain_size + utf8_size;
++               } else if (plain_pv) {
++                   st->total_size += plain_size;
++               } else if (utf8_pv) {
++                   st->total_size += utf8_size;
++               } /* else surely unreachable? */
++               TAG;break;
++           }
++#endif
++#ifdef OPpARGELEM_MASK
++           case OP_ARGCHECK:
++               st->total_size += sizeof(UNOP_AUX_item) * 3;
++               TAG;break;
++           case OP_ARGELEM:
++               /* This OP is a sneaky hack, and stuffs an integer into the
++                  pointer. So there is no allocation to total up. */
++               TAG;break;
++#endif
++           default:
++               /* Unknown multiop */
++               TAG;
++               if (st->go_yell) {
++                   warn("Devel::Size: Can't calculate complete size for uknown UNOP_AUX %u\n",
++                        baseop->op_type);
++               }
+ 	    }
+ 	    TAG;break;
+ #endif
+diff --git a/lib/Devel/Size.pm b/lib/Devel/Size.pm
+index 80f530b..3299224 100644
+--- a/lib/Devel/Size.pm
++++ b/lib/Devel/Size.pm
+@@ -14,7 +14,7 @@ require XSLoader;
+ # This allows declaration   use Devel::Size ':all';
+ %EXPORT_TAGS = ( 'all' => \@EXPORT_OK );
+ 
+-$VERSION = '0.82';
++$VERSION = '0.82_50';
+ 
+ XSLoader::load( __PACKAGE__);
+ 
+diff --git a/t/basic.t b/t/basic.t
+index fd79c77..c3c0930 100644
+--- a/t/basic.t
++++ b/t/basic.t
+@@ -31,7 +31,7 @@ can_ok ('Devel::Size', qw/
+   /);
+ 
+ die ("Uhoh, test uses an outdated version of Devel::Size")
+-    unless is ($Devel::Size::VERSION, '0.82', 'VERSION MATCHES');
++    unless is ($Devel::Size::VERSION, '0.82_50', 'VERSION MATCHES');
+ 
+ #############################################################################
+ # some basic checks:
+diff --git a/t/code.t b/t/code.t
+index 0cf3a4d..ae04070 100644
+--- a/t/code.t
++++ b/t/code.t
+@@ -1,7 +1,7 @@
+ #!/usr/bin/perl -w
+ 
+ use strict;
+-use Test::More tests => 18;
++use Test::More tests => 20;
+ use Devel::Size ':all';
+ 
+ # For me, for some files locally, I'm seeing failures
+@@ -145,3 +145,16 @@ my $ode_size = total_size(\&ode);
+ 
+ cmp_ok($ode_size, '<', $two_lex_size + 768,
+        '&ode is bigger than a sub with two lexicals by less than 768 bytes');
++
++# This is a copy of the simplest multiconcat test from t/opbasic/concat.t
++# Like there, this is mostly intended for ASAN to hit:
++sub multiconcat {
++    my $s = chr 0x100;
++    my $t = "\x80" x 1024;
++    $s .= "-$t-";
++    is(length($s), 1027, "utf8 dest with non-utf8 args");
++}
++
++multiconcat();
++cmp_ok(total_size(\&multiconcat), '>', 1024,
++       "pad constant makes this at least 1K");
+-- 
+2.33.0
